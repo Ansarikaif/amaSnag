@@ -27,7 +27,11 @@ AFFILIATE_TAG = os.getenv("AFFILIATE_TAG")
 SCRAPE_URL = 'https://www.amazon.in/deals'
 POST_INTERVAL = 1800  # 30 minutes
 ADMIN_IDS = [672417973]
-DB_PATH = 'deals.db'
+
+# === NEW: Set DB_PATH to a persistent volume mount path ===
+# This tells the bot to save the database in the '/data' directory,
+# which we will link to a persistent Railway Volume.
+DB_PATH = '/data/deals.db'
 TRACKED_EMOJI = '🔍'
 
 # === LOGGER (FIXED for Windows Emoji Support) ===
@@ -46,8 +50,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
 ]
-# === DATABASE (No changes needed) ===
+# === DATABASE (No changes needed in functions) ===
 def init_db():
+    # Ensure the directory for the database exists
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS deals (asin TEXT PRIMARY KEY, discount INTEGER)")
@@ -73,7 +79,6 @@ def is_new_or_updated_deal(asin, discount):
     conn.close()
     return notify_users
 
-# ... (all other database functions remain the same) ...
 def get_users_tracking_asin(asin):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -163,8 +168,9 @@ async def scrape_deals():
     async with async_playwright() as p:
         browser = None
         try:
+            # Note: On Railway, you might need to specify chromium path if issues arise
+            # but their base images are usually well-configured.
             browser = await p.chromium.launch(headless=True)
-            # Create a more "human-like" browser context to avoid detection
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
                 viewport={'width': 1920, 'height': 1080},
@@ -173,7 +179,7 @@ async def scrape_deals():
             page = await context.new_page()
             await page.goto(SCRAPE_URL, timeout=60000, wait_until='domcontentloaded')
             await page.wait_for_selector('div[data-testid="product-card"]', timeout=20000)
-            await page.wait_for_timeout(random.randint(3000, 6000)) # Use a random delay
+            await page.wait_for_timeout(random.randint(3000, 6000))
             content = await page.content()
             await context.close()
             await browser.close()
@@ -237,9 +243,8 @@ async def scrape_deals():
     return deals
 
 
-# === TELEGRAM FUNCTIONS (No changes needed in handlers or post_deals) ===
-# ... (post_deals, my_deals, start, help_command, etc. all remain the same) ...
-async def post_deals(context: ContextTypes.DEFAULT_TYPE = None): # Modified for APScheduler context
+# === TELEGRAM FUNCTIONS ===
+async def post_deals(context: ContextTypes.DEFAULT_TYPE = None):
     bot = context.bot if context else ApplicationBuilder().token(TOKEN).build().bot
     deals = await scrape_deals()
     for deal in deals:
@@ -275,7 +280,7 @@ async def post_deals(context: ContextTypes.DEFAULT_TYPE = None): # Modified for 
                     mark_user_notified(user, deal['asin'])
         except Exception as e:
             logger.warning(f"Failed to send deal for ASIN {deal.get('asin', 'N/A')}: {e}")
-        await asyncio.sleep(2) # Prevent rate-limiting
+        await asyncio.sleep(2)
 
 
 async def my_deals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -366,13 +371,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_msg, parse_mode='HTML', disable_web_page_preview=True)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     help_text = (
         "<b>🛠 Commands Available:</b>\n"
         "━━━━━━━━━━━━━━━\n"
-        "🔎 <b>/mydeals</b> – See your tracked deals.\n"
-        "📉 <b>/setdiscount 30</b> – Get alerts only for deals with ≥ 30% off.\n"
-        "📤 <b>/post</b> – (Admins) Post the latest scraped deals to the channel.\n"
-        "ℹ️ <b>/help</b> – View this help message.\n\n"
+        "🔎 /mydeals – See your tracked deals.\n"
+        "📉 /setdiscount 30 – Get alerts only for deals with ≥ 30% off.\n"
+        "ℹ️ /help – View this help message.\n\n"
+    )
+
+    if user_id in ADMIN_IDS:
+        help_text += (
+            "<b>👑 Admin Commands:</b>\n"
+            "📤 /post – Post the latest scraped deals to the channel.\n"
+            "📂 /getdb – Receive the `deals.db` database file.\n\n"
+        )
+
+    help_text += (
         "📌 <b>Inline Buttons:</b>\n"
         "🔍 Track – Get alerts when discounts increase\n"
         "❌ Untrack – Stop alerts for a deal\n"
@@ -380,6 +395,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❤️ Powered by @AmaSnag"
     )
     await update.message.reply_text(help_text, parse_mode='HTML', disable_web_page_preview=True)
+
 
 async def set_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -435,14 +451,35 @@ async def manual_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await post_deals(context)
     await update.message.reply_text("✅ Posting complete.")
 
+async def get_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends the database file to an admin."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        logger.warning(f"Unauthorized /getdb attempt by user ID: {user_id}")
+        return
 
-# === MAIN (IMPROVED with Increased Timeouts) ===
+    logger.info(f"Admin user {user_id} requested the database.")
+    try:
+        with open(DB_PATH, 'rb') as db_file:
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=db_file,
+                filename=os.path.basename(DB_PATH)
+            )
+        logger.info(f"Database file sent successfully to admin {user_id}.")
+    except FileNotFoundError:
+        logger.error(f"Database file not found at path: {DB_PATH}")
+        await update.message.reply_text("❌ Error: The database file could not be found.")
+    except Exception as e:
+        logger.error(f"Failed to send database file to admin {user_id}: {e}")
+        await update.message.reply_text("❌ An unexpected error occurred while sending the database file.")
+
+
+# === MAIN ===
 async def main() -> None:
     """Start the bot and the scheduler."""
     init_db()
 
-    # Increase network timeouts to be more resilient against network lag.
-    # We set a 10-second connect timeout and a 20-second read timeout.
     request = HTTPXRequest(
         connect_timeout=10.0,
         read_timeout=20.0,
@@ -455,6 +492,7 @@ async def main() -> None:
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('mydeals', my_deals))
     app.add_handler(CommandHandler('post', manual_post))
+    app.add_handler(CommandHandler('getdb', get_db))
     app.add_handler(CommandHandler('setdiscount', set_discount))
     app.add_handler(CallbackQueryHandler(handle_track_button, pattern=r'^track_'))
     app.add_handler(CallbackQueryHandler(handle_untrack_button, pattern=r'^untrack_'))
@@ -475,9 +513,6 @@ async def main() -> None:
 
 if __name__ == '__main__':
     try:
-        # On Windows, you might want to run `set PYTHONUTF8=1` in your terminal
-        # before running the script to ensure the console can handle all unicode characters.
-        # The logging fix should handle the log file, but this can fix the console output.
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped by user.")
