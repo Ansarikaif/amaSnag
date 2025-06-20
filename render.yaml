@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: amazon-deals-telegram-bot
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install
+    startCommand: python main.py
+    envVars:
+      - key: TOKEN
+        value: your_telegram_bot_token
+      - key: CHANNEL_ID
+        value: @your_channel_username
+      - key: AFFILIATE_TAG
+        value: amasnag-21
