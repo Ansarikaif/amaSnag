@@ -26,7 +26,7 @@ TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID") # For public channels use "@YourChannelName", for private channels use its ID like -1001234567890
 AFFILIATE_TAG = os.getenv("AFFILIATE_TAG")
 SCRAPE_URL = 'https://www.amazon.in/deals'
-POST_INTERVAL = 1800  # 30 minutes
+POST_INTERVAL = 10800  # 3 hour
 
 # Set ADMIN_IDS as a comma-separated string in your environment variables (e.g., "672417973,987654321")
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
