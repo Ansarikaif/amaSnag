@@ -1,3 +1,4 @@
+# === REQUIRED MODULES ===
 import os
 import re
 import random
@@ -19,17 +20,21 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# === CONFIG (Using Environment Variables for Safety) ===
+# === CONFIG (Using Environment Variables for Hosting) ===
+# Set these environment variables in your hosting service's dashboard.
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID") # For public channels use "@YourChannelName", for private channels use its ID like -1001234567890
 AFFILIATE_TAG = os.getenv("AFFILIATE_TAG")
 SCRAPE_URL = 'https://www.amazon.in/deals'
 POST_INTERVAL = 1800  # 30 minutes
-ADMIN_IDS = [672417973] # Replace with your actual Admin User ID(s)
 
-# === NEW: Set DB_PATH to a persistent volume mount path ===
-# This tells the bot to save the database in the '/data' directory,
-# which we will link to a persistent Railway Volume.
+# Set ADMIN_IDS as a comma-separated string in your environment variables (e.g., "672417973,987654321")
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = [int(admin_id) for admin_id in ADMIN_IDS_STR.split(',') if admin_id]
+
+
+# === DB_PATH for persistent storage ===
+# This path is configured for services like Railway that use persistent volumes.
 DB_PATH = '/data/deals.db'
 TRACKED_EMOJI = '🔍'
 
@@ -167,6 +172,7 @@ async def scrape_deals():
     async with async_playwright() as p:
         browser = None
         try:
+            # Note: For hosting, ensure the buildpack includes chromium dependencies
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
@@ -442,7 +448,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🛠 Commands Available:</b>\n"
         "━━━━━━━━━━━━━━━\n"
         "🔎 /mydeals – See your tracked deals.\n"
-        "  /setdiscount 30 – Get alerts only for deals with ≥ 30% off.\n"
+        "📉 /setdiscount 30 – Get alerts only for deals with ≥ 30% off.\n"
         "ℹ️ /help – View this help message.\n\n"
     )
 
@@ -450,7 +456,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text += (
             "<b>👑 Admin Commands:</b>\n"
             "📤 /post – Post the latest scraped deals to the channel.\n"
-            "🔗 /url &lt;ASIN or URL&gt; – Manually post a specific product.\n" # NEW HELP TEXT
+            "🔗 /url &lt;ASIN or URL&gt; – Manually post a specific product.\n" 
             "📂 /getdb – Receive the `deals.db` database file.\n\n"
         )
 
@@ -609,6 +615,11 @@ async def post_by_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === MAIN ===
 async def main() -> None:
     """Start the bot and the scheduler."""
+    # Add a check for essential environment variables on startup
+    if not all([TOKEN, CHANNEL_ID, AFFILIATE_TAG, ADMIN_IDS]):
+        logger.critical("FATAL: Missing one or more essential environment variables (TOKEN, CHANNEL_ID, AFFILIATE_TAG, ADMIN_IDS). Shutting down.")
+        return
+
     init_db()
 
     request = HTTPXRequest(
