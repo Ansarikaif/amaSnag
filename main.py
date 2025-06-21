@@ -282,9 +282,13 @@ async def scrape_single_product_by_asin(asin: str):
         logger.warning(f"CAPTCHA detected on product page for ASIN {asin}")
         return None
 
-    # Optional debug
+   # Optional debug
+try:
+    os.makedirs("/mnt/data", exist_ok=True)
     with open(f"/mnt/data/debug_{asin}.html", "w", encoding="utf-8") as f:
         f.write(content)
+except Exception as e:
+    logger.warning(f"Could not save debug HTML for ASIN {asin}: {e}")
 
     soup = BeautifulSoup(content, 'html.parser')
 
