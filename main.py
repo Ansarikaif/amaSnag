@@ -1,4 +1,3 @@
-# === REQUIRED MODULES ===
 import os
 import re
 import random
@@ -26,7 +25,7 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 AFFILIATE_TAG = os.getenv("AFFILIATE_TAG")
 SCRAPE_URL = 'https://www.amazon.in/deals'
 POST_INTERVAL = 1800  # 30 minutes
-ADMIN_IDS = [672417973]
+ADMIN_IDS = [672417973] # Replace with your actual Admin User ID(s)
 
 # === NEW: Set DB_PATH to a persistent volume mount path ===
 # This tells the bot to save the database in the '/data' directory,
@@ -168,8 +167,6 @@ async def scrape_deals():
     async with async_playwright() as p:
         browser = None
         try:
-            # Note: On Railway, you might need to specify chromium path if issues arise
-            # but their base images are usually well-configured.
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
                 user_agent=random.choice(USER_AGENTS),
@@ -242,6 +239,75 @@ async def scrape_deals():
         
     return deals
 
+# === NEW URL SCRAPER ===
+async def scrape_single_product_by_asin(asin: str):
+    """
+    Scrapes a single Amazon product page by its ASIN.
+    """
+    url = f"https://www.amazon.in/dp/{asin}"
+    logger.info(f"Starting single product scrape for ASIN: {asin} at URL: {url}")
+    
+    async with async_playwright() as p:
+        browser = None
+        try:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+            page = await context.new_page()
+            await page.goto(url, timeout=60000, wait_until='domcontentloaded')
+            await page.wait_for_timeout(random.randint(2000, 4000)) # wait for dynamic content
+            content = await page.content()
+            await browser.close()
+        except Exception as e:
+            logger.error(f"Playwright failed to scrape single product {asin}: {e}")
+            if browser:
+                await browser.close()
+            return None
+
+    soup = BeautifulSoup(content, 'html.parser')
+    
+    # --- Extract Title ---
+    title_tag = soup.find('span', id='productTitle')
+    title = title_tag.get_text(strip=True) if title_tag else 'No Title Found'
+
+    if title == 'No Title Found':
+        logger.warning(f"Could not find title for ASIN {asin}. Page might not have loaded correctly.")
+        return None
+
+    # --- Extract Image ---
+    image = ''
+    image_tag_container = soup.find('div', id='imgTagWrapperId')
+    if image_tag_container:
+        image_tag = image_tag_container.find('img')
+        if image_tag and image_tag.has_attr('src'):
+            image = image_tag['src']
+
+    # --- Extract Discount ---
+    discount_str = "Discount not found"
+    discount_val = 0
+    discount_badge = soup.find('span', class_=re.compile(r'savingsPercentage'))
+    if discount_badge:
+        match = re.search(r'(\d+)', discount_badge.get_text())
+        if match:
+            discount_val = int(match.group(1))
+            discount_str = f"{discount_val}% off"
+
+    # --- Extract Coupon ---
+    coupon_text = 'No Coupon'
+    # This selector is highly variable, look for common patterns
+    coupon_tag = soup.find('span', string=re.compile(r'Apply.*coupon', re.IGNORECASE))
+    if coupon_tag:
+        coupon_text = coupon_tag.get_text(strip=True)
+
+    return {
+        'asin': asin, 
+        'title': title, 
+        'discount': discount_str, 
+        'coupon': coupon_text,
+        'image': image, 
+        'link': f"https://www.amazon.in/dp/{asin}/?tag={AFFILIATE_TAG}", 
+        'category': get_category(title), 
+        'discount_val': discount_val
+    }
 
 # === TELEGRAM FUNCTIONS ===
 async def post_deals(context: ContextTypes.DEFAULT_TYPE = None):
@@ -376,7 +442,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🛠 Commands Available:</b>\n"
         "━━━━━━━━━━━━━━━\n"
         "🔎 /mydeals – See your tracked deals.\n"
-        "📉 /setdiscount 30 – Get alerts only for deals with ≥ 30% off.\n"
+        "  /setdiscount 30 – Get alerts only for deals with ≥ 30% off.\n"
         "ℹ️ /help – View this help message.\n\n"
     )
 
@@ -384,6 +450,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text += (
             "<b>👑 Admin Commands:</b>\n"
             "📤 /post – Post the latest scraped deals to the channel.\n"
+            "🔗 /url &lt;ASIN or URL&gt; – Manually post a specific product.\n" # NEW HELP TEXT
             "📂 /getdb – Receive the `deals.db` database file.\n\n"
         )
 
@@ -443,6 +510,7 @@ async def handle_track_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await query.answer(text=f"{TRACKED_EMOJI} Already tracking.")
 
+# === ADMIN COMMANDS ===
 async def manual_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("🚫 Unauthorized.")
@@ -474,6 +542,69 @@ async def get_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to send database file to admin {user_id}: {e}")
         await update.message.reply_text("❌ An unexpected error occurred while sending the database file.")
 
+# === NEW URL HANDLER (ADMIN) ===
+async def post_by_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows an admin to post a product by its URL or ASIN."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("🚫 Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Please provide a product URL or ASIN.\nUsage: /url <URL_or_ASIN>")
+        return
+
+    input_arg = context.args[0]
+    
+    # Regex to find ASIN in a URL or check if the arg itself is an ASIN
+    match = re.search(r'(?:/dp/|/gp/product/)(B[A-Z0-9]{9})', input_arg)
+    asin = match.group(1) if match else (input_arg if re.match(r'^B[A-Z0-9]{9}$', input_arg) else None)
+
+    if not asin:
+        await update.message.reply_text("❌ Could not find a valid ASIN in the provided input.")
+        return
+
+    await update.message.reply_text(f"Scraping product with ASIN: {asin}...")
+    
+    deal = await scrape_single_product_by_asin(asin)
+
+    if not deal:
+        await update.message.reply_text(f"❌ Failed to scrape product details for ASIN {asin}.")
+        return
+        
+    # Format message and post to channel
+    msg = f"✨ <b>{deal['title']}</b>\n\n"
+    if deal['discount'] != 'Discount not found':
+        msg += f"🔹 {deal['discount']}\n"
+    if deal['coupon'] != 'No Coupon':
+        msg += f"💳 {deal['coupon']}\n"
+    msg += f"🌂 {deal['category']}\n"
+    msg += f"🔗 <a href='{deal['link']}'>Check The Deal</a>"
+    msg += "\n\nFor more deals and features, join our bot: <a href='https://t.me/AmaSnag_Bot'>@AmaSnag_Bot</a>"
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔍 Track Deal", callback_data=f"track_{deal['asin']}"),
+            InlineKeyboardButton("❌ Untrack", callback_data=f"untrack_{deal['asin']}")
+        ],
+        [InlineKeyboardButton("📣 Share", url=f"https://t.me/share/url?url={deal['link']}")]
+    ])
+    
+    try:
+        if deal['image']:
+            await context.bot.send_photo(chat_id=CHANNEL_ID, photo=deal['image'], caption=msg, parse_mode='HTML', reply_markup=keyboard)
+        else:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode='HTML', reply_markup=keyboard)
+        
+        await update.message.reply_text(f"✅ Successfully posted deal for ASIN {asin} to the channel.")
+        # Also add/update it in the local DB so tracking works
+        if deal['discount_val'] > 0:
+            is_new_or_updated_deal(asin, deal['discount_val'])
+            clear_user_notifications(asin)
+            
+    except Exception as e:
+        logger.error(f"Failed to post manual deal for ASIN {asin}: {e}")
+        await update.message.reply_text(f"❌ An error occurred while posting to the channel: {e}")
 
 # === MAIN ===
 async def main() -> None:
@@ -494,6 +625,7 @@ async def main() -> None:
     app.add_handler(CommandHandler('post', manual_post))
     app.add_handler(CommandHandler('getdb', get_db))
     app.add_handler(CommandHandler('setdiscount', set_discount))
+    app.add_handler(CommandHandler('url', post_by_url)) # NEW HANDLER
     app.add_handler(CallbackQueryHandler(handle_track_button, pattern=r'^track_'))
     app.add_handler(CallbackQueryHandler(handle_untrack_button, pattern=r'^untrack_'))
     app.add_handler(CallbackQueryHandler(my_deals, pattern=r'^mydeals_page_'))
