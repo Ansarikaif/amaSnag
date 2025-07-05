@@ -1,6 +1,5 @@
-python-telegram-bot==20.7
+python-telegram-bot[httpx]
 playwright
 beautifulsoup4
 apscheduler
-httpx
-psycopg
+psycopg2-binary
